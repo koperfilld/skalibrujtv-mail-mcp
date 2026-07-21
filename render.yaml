@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: skalibrujtv-mail-mcp
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: IMAP_HOST
+        value: d8.thecamels.org
+      - key: IMAP_PORT
+        value: 993
+      - key: MAIL1_USER
+        value: maciej.koper@skalibrujtv.pl
+      - key: MAIL1_PASSWORD
+        sync: false
+      - key: MAIL2_USER
+        value: info@skalibrujtv.pl
+      - key: MAIL2_PASSWORD
+        sync: false
+      - key: MCP_ACCESS_TOKEN
+        generateValue: true
