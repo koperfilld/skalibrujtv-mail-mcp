@@ -1,0 +1,20 @@
+{
+  "name": "skalibrujtv-mail-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "check": "node --check src/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.5",
+    "express": "^5.1.0",
+    "imapflow": "^1.0.195",
+    "mailparser": "^3.7.4",
+    "zod": "^3.25.76"
+  }
+}
