@@ -27,61 +27,143 @@ const accounts = {
 };
 
 for (const [name, account] of Object.entries(accounts)) {
-  if (!account.password) throw new Error(`Missing password for account ${name}`);
+  if (!account.password) {
+    throw new Error(`Missing password for account ${name}`);
+  }
 }
 
 function text(value) {
-  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(value, null, 2),
+      },
+    ],
+  };
 }
 
 function safeAccount(name) {
   const account = accounts[name];
-  if (!account) throw new Error(`Unknown account: ${name}`);
+
+  if (!account) {
+    throw new Error(`Unknown account: ${name}`);
+  }
+
   return account;
+}
+
+function imapErrorDetails(error) {
+  return {
+    message: error?.message || "Unknown error",
+    code: error?.code || null,
+    responseStatus: error?.responseStatus || null,
+    authenticationFailed: Boolean(error?.authenticationFailed),
+  };
 }
 
 async function withImap(accountName, fn) {
   const account = safeAccount(accountName);
+
   const client = new ImapFlow({
     host: IMAP_HOST,
     port: IMAP_PORT,
     secure: true,
-    auth: { user: account.email, pass: account.password },
+    auth: {
+      user: account.email,
+      pass: account.password,
+    },
     logger: false,
   });
-  await client.connect();
+
+  client.on("error", (error) => {
+    console.error(
+      `[IMAP:${accountName}] client error`,
+      imapErrorDetails(error),
+    );
+  });
+
+  client.on("close", () => {
+    console.log(`[IMAP:${accountName}] connection closed`);
+  });
+
   try {
+    console.log(
+      `[IMAP:${accountName}] connecting to ${IMAP_HOST}:${IMAP_PORT}`,
+    );
+
+    await client.connect();
+
+    console.log(`[IMAP:${accountName}] connected`);
+
     return await fn(client, account);
+  } catch (error) {
+    console.error(
+      `[IMAP:${accountName}] operation failed`,
+      imapErrorDetails(error),
+    );
+
+    throw error;
   } finally {
-    await client.logout().catch(() => {});
+    if (client.usable) {
+      try {
+        await client.logout();
+      } catch (error) {
+        console.warn(
+          `[IMAP:${accountName}] logout failed`,
+          imapErrorDetails(error),
+        );
+      }
+    }
   }
 }
 
 function addresses(value) {
-  return value?.map((item) => ({ name: item.name || "", address: item.address || "" })) || [];
+  return (
+    value?.map((item) => ({
+      name: item.name || "",
+      address: item.address || "",
+    })) || []
+  );
 }
 
 function createServer() {
-  const server = new McpServer({ name: "SkalibrujTV Mail", version: "1.0.0" });
+  const server = new McpServer({
+    name: "SkalibrujTV Mail",
+    version: "1.0.0",
+  });
 
   server.tool(
     "list_accounts",
     "List the email accounts available through this private connector.",
     {},
-    async () => text(Object.entries(accounts).map(([id, a]) => ({ id, email: a.email }))),
+    async () =>
+      text(
+        Object.entries(accounts).map(([id, account]) => ({
+          id,
+          email: account.email,
+        })),
+      ),
   );
 
   server.tool(
     "list_mailboxes",
     "List folders/mailboxes for one email account.",
-    { account: z.enum(["maciej", "info"]) },
-    async ({ account }) => withImap(account, async (client) => {
-      const result = [];
-      for await (const box of client.list()) {
-        result.push({ path: box.path, name: box.name, specialUse: box.specialUse || null });
-      }
-      return text(result);
-    }),
+    {
+      account: z.enum(["maciej", "info"]),
+    },
+    async ({ account }) =>
+      withImap(account, async (client) => {
+        const boxes = await client.list();
+
+        return text(
+          boxes.map((box) => ({
+            path: box.path,
+            name: box.name,
+            specialUse: box.specialUse || null,
+          })),
+        );
+      }),
   );
 
   server.tool(
@@ -92,41 +174,101 @@ function createServer() {
       mailbox: z.string().default("INBOX"),
       query: z.string().default(""),
       from: z.string().optional(),
-      since: z.string().optional().describe("ISO date, for example 2026-07-01"),
+      since: z
+        .string()
+        .optional()
+        .describe("ISO date, for example 2026-07-01"),
       unseenOnly: z.boolean().default(false),
       limit: z.number().int().min(1).max(100).default(25),
     },
-    async ({ account, mailbox, query, from, since, unseenOnly, limit }) => withImap(account, async (client) => {
-      const lock = await client.getMailboxLock(mailbox);
-      try {
-        const criteria = {};
-        if (query) criteria.or = [{ subject: query }, { body: query }, { from: query }, { to: query }];
-        if (from) criteria.from = from;
-        if (since) criteria.since = new Date(`${since}T00:00:00Z`);
-        if (unseenOnly) criteria.seen = false;
-        const uids = await client.search(criteria, { uid: true });
-        const selected = uids.slice(-limit).reverse();
-        const rows = [];
-        for (const uid of selected) {
-          const msg = await client.fetchOne(uid, { uid: true, envelope: true, flags: true, internalDate: true, size: true }, { uid: true });
-          if (!msg) continue;
-          rows.push({
-            uid: msg.uid,
-            mailbox,
-            subject: msg.envelope?.subject || "",
-            from: addresses(msg.envelope?.from),
-            to: addresses(msg.envelope?.to),
-            date: (msg.envelope?.date || msg.internalDate)?.toISOString?.() || null,
-            seen: msg.flags?.has("\\Seen") || false,
-            flagged: msg.flags?.has("\\Flagged") || false,
-            size: msg.size || null,
+    async ({
+      account,
+      mailbox,
+      query,
+      from,
+      since,
+      unseenOnly,
+      limit,
+    }) =>
+      withImap(account, async (client) => {
+        const lock = await client.getMailboxLock(mailbox);
+
+        try {
+          const criteria = {};
+
+          if (query) {
+            criteria.or = [
+              { subject: query },
+              { body: query },
+              { from: query },
+              { to: query },
+            ];
+          }
+
+          if (from) {
+            criteria.from = from;
+          }
+
+          if (since) {
+            criteria.since = new Date(`${since}T00:00:00Z`);
+          }
+
+          if (unseenOnly) {
+            criteria.seen = false;
+          }
+
+          const searchCriteria =
+            Object.keys(criteria).length > 0
+              ? criteria
+              : { all: true };
+
+          const uids = await client.search(searchCriteria, {
+            uid: true,
           });
+
+          const selected = uids.slice(-limit).reverse();
+          const rows = [];
+
+          for (const uid of selected) {
+            const msg = await client.fetchOne(
+              uid,
+              {
+                uid: true,
+                envelope: true,
+                flags: true,
+                internalDate: true,
+                size: true,
+              },
+              {
+                uid: true,
+              },
+            );
+
+            if (!msg) {
+              continue;
+            }
+
+            rows.push({
+              uid: msg.uid,
+              mailbox,
+              subject: msg.envelope?.subject || "",
+              from: addresses(msg.envelope?.from),
+              to: addresses(msg.envelope?.to),
+              date:
+                (
+                  msg.envelope?.date || msg.internalDate
+                )?.toISOString?.() || null,
+              seen: msg.flags?.has("\\Seen") || false,
+              flagged: msg.flags?.has("\\Flagged") || false,
+              size: msg.size || null,
+            });
+          }
+
+          return text(rows);
+        } finally {
+          lock.release();
         }
-        return text(rows);
-      } finally {
-        lock.release();
-      }
-    }),
+      }),
   );
 
   server.tool(
@@ -138,29 +280,65 @@ function createServer() {
       uid: z.number().int().positive(),
       markSeen: z.boolean().default(false),
     },
-    async ({ account, mailbox, uid, markSeen }) => withImap(account, async (client) => {
-      const lock = await client.getMailboxLock(mailbox);
-      try {
-        const msg = await client.fetchOne(uid, { source: true, uid: true }, { uid: true });
-        if (!msg?.source) throw new Error("Message not found");
-        const parsed = await simpleParser(msg.source);
-        if (markSeen) await client.messageFlagsAdd(uid, ["\\Seen"], { uid: true });
-        return text({
-          uid,
-          mailbox,
-          messageId: parsed.messageId || null,
-          subject: parsed.subject || "",
-          from: parsed.from?.text || "",
-          to: parsed.to?.text || "",
-          cc: parsed.cc?.text || "",
-          date: parsed.date?.toISOString?.() || null,
-          text: parsed.text || "",
-          attachments: parsed.attachments.map((a) => ({ filename: a.filename || null, contentType: a.contentType, size: a.size })),
-        });
-      } finally {
-        lock.release();
-      }
-    }),
+    async ({
+      account,
+      mailbox,
+      uid,
+      markSeen,
+    }) =>
+      withImap(account, async (client) => {
+        const lock = await client.getMailboxLock(mailbox);
+
+        try {
+          const msg = await client.fetchOne(
+            uid,
+            {
+              source: true,
+              uid: true,
+            },
+            {
+              uid: true,
+            },
+          );
+
+          if (!msg?.source) {
+            throw new Error("Message not found");
+          }
+
+          const parsed = await simpleParser(msg.source);
+
+          if (markSeen) {
+            await client.messageFlagsAdd(
+              uid,
+              ["\\Seen"],
+              {
+                uid: true,
+              },
+            );
+          }
+
+          return text({
+            uid,
+            mailbox,
+            messageId: parsed.messageId || null,
+            subject: parsed.subject || "",
+            from: parsed.from?.text || "",
+            to: parsed.to?.text || "",
+            cc: parsed.cc?.text || "",
+            date: parsed.date?.toISOString?.() || null,
+            text: parsed.text || "",
+            attachments: parsed.attachments.map(
+              (attachment) => ({
+                filename: attachment.filename || null,
+                contentType: attachment.contentType,
+                size: attachment.size,
+              }),
+            ),
+          });
+        } finally {
+          lock.release();
+        }
+      }),
   );
 
   server.tool(
@@ -169,20 +347,53 @@ function createServer() {
     {
       account: z.enum(["maciej", "info"]),
       mailbox: z.string().default("INBOX"),
-      uids: z.array(z.number().int().positive()).min(1).max(100),
+      uids: z
+        .array(z.number().int().positive())
+        .min(1)
+        .max(100),
       seen: z.boolean(),
     },
-    async ({ account, mailbox, uids, seen }) => withImap(account, async (client) => {
-      const lock = await client.getMailboxLock(mailbox);
-      try {
-        const range = uids.join(",");
-        if (seen) await client.messageFlagsAdd(range, ["\\Seen"], { uid: true });
-        else await client.messageFlagsRemove(range, ["\\Seen"], { uid: true });
-        return text({ success: true, account, mailbox, uids, seen });
-      } finally {
-        lock.release();
-      }
-    }),
+    async ({
+      account,
+      mailbox,
+      uids,
+      seen,
+    }) =>
+      withImap(account, async (client) => {
+        const lock = await client.getMailboxLock(mailbox);
+
+        try {
+          const range = uids.join(",");
+
+          if (seen) {
+            await client.messageFlagsAdd(
+              range,
+              ["\\Seen"],
+              {
+                uid: true,
+              },
+            );
+          } else {
+            await client.messageFlagsRemove(
+              range,
+              ["\\Seen"],
+              {
+                uid: true,
+              },
+            );
+          }
+
+          return text({
+            success: true,
+            account,
+            mailbox,
+            uids,
+            seen,
+          });
+        } finally {
+          lock.release();
+        }
+      }),
   );
 
   server.tool(
@@ -192,17 +403,40 @@ function createServer() {
       account: z.enum(["maciej", "info"]),
       mailbox: z.string().default("INBOX"),
       destination: z.string(),
-      uids: z.array(z.number().int().positive()).min(1).max(100),
+      uids: z
+        .array(z.number().int().positive())
+        .min(1)
+        .max(100),
     },
-    async ({ account, mailbox, destination, uids }) => withImap(account, async (client) => {
-      const lock = await client.getMailboxLock(mailbox);
-      try {
-        await client.messageMove(uids.join(","), destination, { uid: true });
-        return text({ success: true, account, from: mailbox, destination, uids });
-      } finally {
-        lock.release();
-      }
-    }),
+    async ({
+      account,
+      mailbox,
+      destination,
+      uids,
+    }) =>
+      withImap(account, async (client) => {
+        const lock = await client.getMailboxLock(mailbox);
+
+        try {
+          await client.messageMove(
+            uids.join(","),
+            destination,
+            {
+              uid: true,
+            },
+          );
+
+          return text({
+            success: true,
+            account,
+            from: mailbox,
+            destination,
+            uids,
+          });
+        } finally {
+          lock.release();
+        }
+      }),
   );
 
   server.tool(
@@ -211,51 +445,106 @@ function createServer() {
     {
       account: z.enum(["maciej", "info"]),
       mailbox: z.string().default("INBOX"),
-      uids: z.array(z.number().int().positive()).min(1).max(100),
+      uids: z
+        .array(z.number().int().positive())
+        .min(1)
+        .max(100),
     },
-    async ({ account, mailbox, uids }) => withImap(account, async (client) => {
-      const lock = await client.getMailboxLock(mailbox);
-      try {
-        await client.messageDelete(uids.join(","), { uid: true });
-        return text({ success: true, permanentlyDeleted: true, account, mailbox, uids });
-      } finally {
-        lock.release();
-      }
-    }),
+    async ({
+      account,
+      mailbox,
+      uids,
+    }) =>
+      withImap(account, async (client) => {
+        const lock = await client.getMailboxLock(mailbox);
+
+        try {
+          await client.messageDelete(
+            uids.join(","),
+            {
+              uid: true,
+            },
+          );
+
+          return text({
+            success: true,
+            permanentlyDeleted: true,
+            account,
+            mailbox,
+            uids,
+          });
+        } finally {
+          lock.release();
+        }
+      }),
   );
 
   return server;
 }
 
 const app = express();
-app.use(express.json({ limit: "2mb" }));
-app.get("/health", (_req, res) => res.json({ ok: true }));
+
+app.use(
+  express.json({
+    limit: "2mb",
+  }),
+);
+
+app.get("/health", (_req, res) => {
+  res.json({
+    ok: true,
+  });
+});
 
 app.all("/mcp/:token", async (req, res) => {
-  const supplied = Buffer.from(req.params.token || "");
+  const supplied = Buffer.from(
+    req.params.token || "",
+  );
+
   const expected = Buffer.from(ACCESS_TOKEN);
-  if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) {
-    return res.status(404).json({ error: "Not found" });
+
+  if (
+    supplied.length !== expected.length ||
+    !crypto.timingSafeEqual(supplied, expected)
+  ) {
+    return res.status(404).json({
+      error: "Not found",
+    });
   }
 
   const server = createServer();
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-    enableJsonResponse: true,
-  });
+
+  const transport =
+    new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true,
+    });
+
   res.on("close", () => {
     transport.close().catch(() => {});
     server.close().catch(() => {});
   });
+
   try {
     await server.connect(transport);
-    await transport.handleRequest(req, res, req.body);
+    await transport.handleRequest(
+      req,
+      res,
+      req.body,
+    );
   } catch (error) {
     console.error(error);
-    if (!res.headersSent) res.status(500).json({ error: "Internal server error" });
+
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: "Internal server error",
+      });
+    }
   }
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`SkalibrujTV Mail MCP listening on port ${PORT}`);
+  console.log(
+    `SkalibrujTV Mail MCP listening on port ${PORT}`,
+  );
 });
