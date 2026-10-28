@@ -19,18 +19,40 @@ const accounts = {
   maciej: {
     email: process.env.MAIL1_USER || "maciej.koper@skalibrujtv.pl",
     password: process.env.MAIL1_PASSWORD,
+    host: process.env.MAIL1_HOST || IMAP_HOST,
+    required: true,
   },
   info: {
     email: process.env.MAIL2_USER || "info@skalibrujtv.pl",
     password: process.env.MAIL2_PASSWORD,
+    host: process.env.MAIL2_HOST || IMAP_HOST,
+    required: true,
+  },
+  biuro: {
+    email: process.env.MAIL3_USER || "biuro@wybierz.tv",
+    password: process.env.MAIL3_PASSWORD,
+    host: process.env.MAIL3_HOST || IMAP_HOST,
+    required: false,
   },
 };
 
 for (const [name, account] of Object.entries(accounts)) {
-  if (!account.password) {
+  if (account.password) {
+    continue;
+  }
+
+  if (account.required) {
     throw new Error(`Missing password for account ${name}`);
   }
+
+  console.warn(
+    `[config] account ${name} (${account.email}) disabled: no password set`,
+  );
+  delete accounts[name];
 }
+
+const ACCOUNT_IDS = Object.keys(accounts);
+const accountSchema = z.enum(ACCOUNT_IDS);
 
 function text(value) {
   return {
@@ -66,7 +88,7 @@ async function withImap(accountName, fn) {
   const account = safeAccount(accountName);
 
   const client = new ImapFlow({
-    host: IMAP_HOST,
+    host: account.host,
     port: IMAP_PORT,
     secure: true,
     auth: {
@@ -89,7 +111,7 @@ async function withImap(accountName, fn) {
 
   try {
     console.log(
-      `[IMAP:${accountName}] connecting to ${IMAP_HOST}:${IMAP_PORT}`,
+      `[IMAP:${accountName}] connecting to ${account.host}:${IMAP_PORT}`,
     );
 
     await client.connect();
@@ -142,6 +164,7 @@ function createServer() {
         Object.entries(accounts).map(([id, account]) => ({
           id,
           email: account.email,
+          host: account.host,
         })),
       ),
   );
@@ -150,7 +173,7 @@ function createServer() {
     "list_mailboxes",
     "List folders/mailboxes for one email account.",
     {
-      account: z.enum(["maciej", "info"]),
+      account: accountSchema,
     },
     async ({ account }) =>
       withImap(account, async (client) => {
@@ -170,7 +193,7 @@ function createServer() {
     "search_messages",
     "Search message headers in a mailbox. Returns newest matching messages first. Use blank query to list recent mail.",
     {
-      account: z.enum(["maciej", "info"]),
+      account: accountSchema,
       mailbox: z.string().default("INBOX"),
       query: z.string().default(""),
       from: z.string().optional(),
@@ -275,7 +298,7 @@ function createServer() {
     "get_message",
     "Read one complete email message by IMAP UID, including a list of attachments. Attachment bytes are not returned.",
     {
-      account: z.enum(["maciej", "info"]),
+      account: accountSchema,
       mailbox: z.string().default("INBOX"),
       uid: z.number().int().positive(),
       markSeen: z.boolean().default(false),
@@ -345,7 +368,7 @@ function createServer() {
     "set_seen",
     "Mark messages as read or unread. This changes mailbox state and should only be used after user confirmation.",
     {
-      account: z.enum(["maciej", "info"]),
+      account: accountSchema,
       mailbox: z.string().default("INBOX"),
       uids: z
         .array(z.number().int().positive())
@@ -400,7 +423,7 @@ function createServer() {
     "move_messages",
     "Move messages to another folder. This changes mailbox state and should only be used after user confirmation.",
     {
-      account: z.enum(["maciej", "info"]),
+      account: accountSchema,
       mailbox: z.string().default("INBOX"),
       destination: z.string(),
       uids: z
@@ -443,7 +466,7 @@ function createServer() {
     "delete_messages",
     "Permanently delete messages. This is destructive and must only be used after explicit user confirmation.",
     {
-      account: z.enum(["maciej", "info"]),
+      account: accountSchema,
       mailbox: z.string().default("INBOX"),
       uids: z
         .array(z.number().int().positive())
