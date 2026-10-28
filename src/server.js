@@ -52,7 +52,14 @@ for (const [name, account] of Object.entries(accounts)) {
 }
 
 const ACCOUNT_IDS = Object.keys(accounts);
-const accountSchema = z.enum(ACCOUNT_IDS);
+
+// Plain string validated in safeAccount() instead of z.enum(): MCP clients
+// cache tool schemas, so a hard enum goes stale when accounts are added.
+const accountSchema = z
+  .string()
+  .describe(
+    `Account id from list_accounts (configured: ${ACCOUNT_IDS.join(", ")})`,
+  );
 
 function text(value) {
   return {
@@ -66,10 +73,12 @@ function text(value) {
 }
 
 function safeAccount(name) {
-  const account = accounts[name];
+  const account = Object.hasOwn(accounts, name) ? accounts[name] : null;
 
   if (!account) {
-    throw new Error(`Unknown account: ${name}`);
+    throw new Error(
+      `Unknown account: ${name}. Available: ${ACCOUNT_IDS.join(", ")}`,
+    );
   }
 
   return account;
@@ -152,7 +161,7 @@ function addresses(value) {
 function createServer() {
   const server = new McpServer({
     name: "SkalibrujTV Mail",
-    version: "1.0.0",
+    version: "1.1.0",
   });
 
   server.tool(
